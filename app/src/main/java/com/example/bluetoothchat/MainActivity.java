@@ -329,4 +329,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
+        
+        // This is the missing piece from the last message!
         public void write(byte
