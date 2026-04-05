@@ -330,5 +330,13 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         
-        // This is the missing piece from the last message!
-        public void write(byte
+        // This is the complete, correct write method
+        public void write(byte[] bytes) {
+            try {
+                outputStream.write(bytes);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
