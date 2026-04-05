@@ -1,4 +1,4 @@
-package com.example.bluetoothchat; // MUST MATCH YOUR PACKAGE NAME
+package com.example.bluetoothchat; 
 
 import android.Manifest;
 import android.annotation.SuppressLint;
@@ -7,7 +7,10 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -41,8 +44,14 @@ public class MainActivity extends AppCompatActivity {
     private BluetoothAdapter bluetoothAdapter;
     private SendReceive sendReceive;
 
+    // Chat List Variables
     private ArrayList<String> chatMessages;
     private ArrayAdapter<String> chatAdapter;
+
+    // Device Scanner Variables
+    private ArrayList<String> deviceList;
+    private ArrayList<BluetoothDevice> deviceObjects;
+    private ArrayAdapter<String> deviceAdapter;
 
     static final int STATE_LISTENING = 1;
     static final int STATE_CONNECTING = 2;
@@ -51,7 +60,6 @@ public class MainActivity extends AppCompatActivity {
     static final int STATE_MESSAGE_RECEIVED = 5;
 
     private static final String APP_NAME = "OfflineChat";
-    // Standard UUID for Bluetooth Serial Port Profile (SPP)
     private static final UUID MY_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
     @Override
@@ -59,7 +67,6 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // Map UI elements
         btnHost = findViewById(R.id.btnHost);
         btnConnect = findViewById(R.id.btnConnect);
         btnSend = findViewById(R.id.btnSend);
@@ -67,32 +74,32 @@ public class MainActivity extends AppCompatActivity {
         messageInput = findViewById(R.id.messageInput);
         chatListView = findViewById(R.id.chatListView);
 
-        // Setup Chat List
         chatMessages = new ArrayList<>();
         chatAdapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, chatMessages);
         chatListView.setAdapter(chatAdapter);
 
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
 
-        // Check if device supports Bluetooth
-        if (bluetoothAdapter == null) {
-            Toast.makeText(this, "Bluetooth is not supported on this device", Toast.LENGTH_LONG).show();
-            return;
-        }
-
         requestBluetoothPermissions();
 
-        // Button Listeners
+        // Register the BroadcastReceiver for discovering new devices
+        IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_FOUND);
+        registerReceiver(deviceReceiver, filter);
+
+        // Setup Device Scanner Adapter
+        deviceList = new ArrayList<>();
+        deviceObjects = new ArrayList<>();
+        deviceAdapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, deviceList);
+
         btnHost.setOnClickListener(v -> {
             if (checkPermissions()) {
-                ServerClass serverClass = new ServerClass();
-                serverClass.start();
+                makeDiscoverableAndHost();
             }
         });
 
         btnConnect.setOnClickListener(v -> {
             if (checkPermissions()) {
-                showPairedDevices();
+                showDeviceListAndScan();
             }
         });
 
@@ -103,33 +110,35 @@ public class MainActivity extends AppCompatActivity {
                 addMessage("Me: " + msg);
                 messageInput.setText("");
             } else if (sendReceive == null) {
-                Toast.makeText(this, "You are not connected to anyone!", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "Not connected!", Toast.LENGTH_SHORT).show();
             }
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        try {
+            unregisterReceiver(deviceReceiver);
+        } catch (IllegalArgumentException e) { e.printStackTrace(); }
     }
 
     private void requestBluetoothPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             ActivityCompat.requestPermissions(this, new String[]{
                     Manifest.permission.BLUETOOTH_CONNECT,
-                    Manifest.permission.BLUETOOTH_SCAN
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_ADVERTISE
             }, 1);
         } else {
             ActivityCompat.requestPermissions(this, new String[]{
-                    Manifest.permission.ACCESS_FINE_LOCATION
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
             }, 1);
         }
     }
 
     private boolean checkPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                requestBluetoothPermissions();
-                return false;
-            }
-        }
-        
-        // Ask to turn on Bluetooth if it's off
         if (!bluetoothAdapter.isEnabled()) {
             Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
             startActivity(enableBtIntent);
@@ -138,55 +147,97 @@ public class MainActivity extends AppCompatActivity {
         return true;
     }
 
-    private void addMessage(String message) {
-        chatMessages.add(message);
-        chatAdapter.notifyDataSetChanged();
-        chatListView.setSelection(chatAdapter.getCount() - 1); // Scroll to bottom
+    @SuppressLint("MissingPermission")
+    private void makeDiscoverableAndHost() {
+        // Asks the user to make this phone visible to others for 5 minutes
+        Intent discoverableIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
+        discoverableIntent.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300);
+        startActivity(discoverableIntent);
+
+        ServerClass serverClass = new ServerClass();
+        serverClass.start();
     }
 
     @SuppressLint("MissingPermission")
-    private void showPairedDevices() {
+    private void showDeviceListAndScan() {
+        deviceList.clear();
+        deviceObjects.clear();
+
+        // 1. Load already paired devices
         Set<BluetoothDevice> pairedDevices = bluetoothAdapter.getBondedDevices();
-        ArrayList<String> deviceNames = new ArrayList<>();
-        ArrayList<BluetoothDevice> devices = new ArrayList<>();
-
-        if (pairedDevices.size() > 0) {
+        if (pairedDevices != null && pairedDevices.size() > 0) {
+            deviceList.add("--- PAIRED DEVICES ---");
+            deviceObjects.add(null); 
             for (BluetoothDevice bt : pairedDevices) {
-                deviceNames.add(bt.getName() + "\n" + bt.getAddress());
-                devices.add(bt);
+                deviceList.add(bt.getName() + "\n" + bt.getAddress());
+                deviceObjects.add(bt);
             }
-
-            ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, deviceNames);
-            new AlertDialog.Builder(this)
-                    .setTitle("Select a Paired Device")
-                    .setAdapter(adapter, (dialog, which) -> {
-                        ClientClass clientClass = new ClientClass(devices.get(which));
-                        clientClass.start();
-                        statusText.setText("Status: Connecting...");
-                    })
-                    .show();
-        } else {
-            Toast.makeText(this, "No paired devices found! Pair in Android Settings first.", Toast.LENGTH_LONG).show();
         }
+
+        // 2. Add header for new devices
+        deviceList.add("--- NEW DEVICES (Scanning...) ---");
+        deviceObjects.add(null);
+        deviceAdapter.notifyDataSetChanged();
+
+        // 3. Show Popup
+        new AlertDialog.Builder(this)
+                .setTitle("Select a Device")
+                .setAdapter(deviceAdapter, (dialog, which) -> {
+                    BluetoothDevice target = deviceObjects.get(which);
+                    if (target == null) return; // User clicked a header text
+
+                    bluetoothAdapter.cancelDiscovery(); // Stop scanning to save battery
+                    ClientClass clientClass = new ClientClass(target);
+                    clientClass.start();
+                    statusText.setText("Status: Connecting...");
+                })
+                .setOnDismissListener(dialog -> {
+                    if (bluetoothAdapter.isDiscovering()) bluetoothAdapter.cancelDiscovery();
+                })
+                .show();
+
+        // 4. Start scanning the airwaves
+        if (bluetoothAdapter.isDiscovering()) {
+            bluetoothAdapter.cancelDiscovery();
+        }
+        bluetoothAdapter.startDiscovery();
     }
 
-    // Handles updates to the UI thread securely
+    // Broadcast Receiver that catches devices as they are found in the air
+    private final BroadcastReceiver deviceReceiver = new BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (BluetoothDevice.ACTION_FOUND.equals(action)) {
+                BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (device != null && device.getName() != null) {
+                    String deviceInfo = device.getName() + "\n" + device.getAddress();
+                    
+                    // Add device to list if it's not already there
+                    if (!deviceList.contains(deviceInfo)) {
+                        deviceList.add(deviceInfo);
+                        deviceObjects.add(device);
+                        deviceAdapter.notifyDataSetChanged();
+                    }
+                }
+            }
+        }
+    };
+
+    private void addMessage(String message) {
+        chatMessages.add(message);
+        chatAdapter.notifyDataSetChanged();
+        chatListView.setSelection(chatAdapter.getCount() - 1);
+    }
+
     Handler handler = new Handler(new Handler.Callback() {
         @Override
         public boolean handleMessage(@NonNull Message msg) {
             switch (msg.what) {
-                case STATE_LISTENING:
-                    statusText.setText("Status: Listening for connections...");
-                    break;
-                case STATE_CONNECTING:
-                    statusText.setText("Status: Connecting...");
-                    break;
-                case STATE_CONNECTED:
-                    statusText.setText("Status: Connected!");
-                    break;
-                case STATE_CONNECTION_FAILED:
-                    statusText.setText("Status: Connection Failed / Dropped");
-                    break;
+                case STATE_LISTENING: statusText.setText("Status: Listening..."); break;
+                case STATE_CONNECTING: statusText.setText("Status: Connecting/Pairing..."); break;
+                case STATE_CONNECTED: statusText.setText("Status: Connected!"); break;
+                case STATE_CONNECTION_FAILED: statusText.setText("Status: Connection Failed"); break;
                 case STATE_MESSAGE_RECEIVED:
                     byte[] readBuff = (byte[]) msg.obj;
                     String tempMsg = new String(readBuff, 0, msg.arg1);
@@ -197,77 +248,57 @@ public class MainActivity extends AppCompatActivity {
         }
     });
 
-    // 1. Thread for Hosting (Listening for incoming connections)
+    // 1. Server Thread (Host)
     private class ServerClass extends Thread {
         private BluetoothServerSocket serverSocket;
-
         @SuppressLint("MissingPermission")
         public ServerClass() {
-            try {
-                serverSocket = bluetoothAdapter.listenUsingRfcommWithServiceRecord(APP_NAME, MY_UUID);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+            try { serverSocket = bluetoothAdapter.listenUsingRfcommWithServiceRecord(APP_NAME, MY_UUID); } 
+            catch (IOException e) { e.printStackTrace(); }
         }
-
         public void run() {
             BluetoothSocket socket = null;
             handler.obtainMessage(STATE_LISTENING).sendToTarget();
-
             while (socket == null) {
-                try {
-                    socket = serverSocket.accept();
-                } catch (IOException e) {
-                    handler.obtainMessage(STATE_CONNECTION_FAILED).sendToTarget();
-                    break;
-                }
-
+                try { socket = serverSocket.accept(); } 
+                catch (IOException e) { handler.obtainMessage(STATE_CONNECTION_FAILED).sendToTarget(); break; }
+                
                 if (socket != null) {
                     handler.obtainMessage(STATE_CONNECTED).sendToTarget();
                     sendReceive = new SendReceive(socket);
                     sendReceive.start();
-                    try {
-                        serverSocket.close(); // Close server socket once connected to prevent others from joining
-                    } catch (IOException e) { e.printStackTrace(); }
+                    try { serverSocket.close(); } catch (IOException e) { e.printStackTrace(); }
                     break;
                 }
             }
         }
     }
 
-    // 2. Thread for Connecting to a Host (Client)
+    // 2. Client Thread (Join)
     private class ClientClass extends Thread {
         private BluetoothSocket socket;
-
         @SuppressLint("MissingPermission")
         public ClientClass(BluetoothDevice device) {
-            try {
-                socket = device.createRfcommSocketToServiceRecord(MY_UUID);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+            try { socket = device.createRfcommSocketToServiceRecord(MY_UUID); } 
+            catch (IOException e) { e.printStackTrace(); }
         }
-
         @SuppressLint("MissingPermission")
         public void run() {
             try {
                 handler.obtainMessage(STATE_CONNECTING).sendToTarget();
                 socket.connect();
                 handler.obtainMessage(STATE_CONNECTED).sendToTarget();
-                
                 sendReceive = new SendReceive(socket);
                 sendReceive.start();
             } catch (IOException e) {
                 e.printStackTrace();
                 handler.obtainMessage(STATE_CONNECTION_FAILED).sendToTarget();
-                try {
-                    socket.close();
-                } catch (IOException ex) { ex.printStackTrace(); }
+                try { socket.close(); } catch (IOException ex) { ex.printStackTrace(); }
             }
         }
     }
 
-    // 3. Thread for Sending and Receiving Data
+    // 3. Send/Receive Thread
     private class SendReceive extends Thread {
         private final BluetoothSocket bluetoothSocket;
         private final InputStream inputStream;
@@ -277,14 +308,10 @@ public class MainActivity extends AppCompatActivity {
             bluetoothSocket = socket;
             InputStream tempIn = null;
             OutputStream tempOut = null;
-
             try {
                 tempIn = bluetoothSocket.getInputStream();
                 tempOut = bluetoothSocket.getOutputStream();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-
+            } catch (IOException e) { e.printStackTrace(); }
             inputStream = tempIn;
             outputStream = tempOut;
         }
@@ -292,10 +319,8 @@ public class MainActivity extends AppCompatActivity {
         public void run() {
             byte[] buffer = new byte[1024];
             int bytes;
-
             while (true) {
                 try {
-                    // Read incoming messages
                     bytes = inputStream.read(buffer);
                     handler.obtainMessage(STATE_MESSAGE_RECEIVED, bytes, -1, buffer).sendToTarget();
                 } catch (IOException e) {
@@ -304,14 +329,4 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
-
-        public void write(byte[] bytes) {
-            try {
-                // Send outgoing messages
-                outputStream.write(bytes);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-    }
-}
+        public void write(byte
